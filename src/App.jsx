@@ -48,12 +48,15 @@ function extractNumbers(str) {
 }
 
 function buildLink(s) {
-  if (s.tracked) return (s.linkTemplate || "").replace("{n}", String(s.episode ?? 0));
+  if (s.tracked) {
+    const padded = String(s.episode ?? 0).padStart(s.padLength || 1, "0");
+    return (s.linkTemplate || "").replace("{n}", padded);
+  }
   return s.linkTemplate || "";
 }
 
 function displayProgress(s) {
-  if (s.tracked) return `ตอนที่ ${s.episode ?? 0}`;
+  if (s.tracked) return `ตอนที่ ${String(s.episode ?? 0).padStart(s.padLength || 1, "0")}`;
   return s.note || "";
 }
 
@@ -508,6 +511,7 @@ function FormModal({ mode, item, existingTags, onClose, onSave }) {
   const matches = useMemo(() => extractNumbers(rawLink), [rawLink]);
   const [selectedIdx, setSelectedIdx] = useState(() => initialSelection(item, extractNumbers(initialRawLink)));
   const [episode, setEpisode] = useState(item?.episode ?? (matches[0] ? Number(matches[0].value) : 0));
+  const [padLength, setPadLength] = useState(item?.padLength ?? (matches[0] ? matches[0].value.length : 1));
 
   function handleLinkChange(value) {
     setRawLink(value);
@@ -515,6 +519,7 @@ function FormModal({ mode, item, existingTags, onClose, onSave }) {
     if (m.length === 1) {
       setSelectedIdx(0);
       setEpisode(Number(m[0].value));
+      setPadLength(m[0].value.length);
     } else {
       setSelectedIdx(null);
     }
@@ -523,6 +528,7 @@ function FormModal({ mode, item, existingTags, onClose, onSave }) {
   function pickMatch(i) {
     setSelectedIdx(i);
     setEpisode(Number(matches[i].value));
+    setPadLength(matches[i].value.length);
   }
 
   const isAmbiguous = matches.length > 1 && selectedIdx === null;
@@ -551,7 +557,7 @@ function FormModal({ mode, item, existingTags, onClose, onSave }) {
     if (typeof selectedIdx === "number") {
       const m = matches[selectedIdx];
       const linkTemplate = rawLink.slice(0, m.start) + "{n}" + rawLink.slice(m.end);
-      onSave({ ...base, tracked: true, linkTemplate, episode: Math.max(0, Number(episode) || 0), note: "" });
+      onSave({ ...base, tracked: true, linkTemplate, episode: Math.max(0, Number(episode) || 0), padLength, note: "" });
     } else {
       onSave({ ...base, tracked: false, linkTemplate: rawLink.trim(), note: note.trim(), episode: undefined });
     }
