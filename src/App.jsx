@@ -1,5 +1,8 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { BookOpen, Search, Plus, Minus, X, Pencil, Trash2, Clock, Library, ExternalLink, ImagePlus } from "lucide-react";
+import {
+  BookOpen, Search, Plus, Minus, X, Pencil, Trash2, Clock, Library,
+  ExternalLink, ImagePlus, Menu, Settings, Download, Upload,
+} from "lucide-react";
 
 const FONT_STYLE = `
 @import url('https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;700&family=Inter:wght@400;500;600&display=swap');
@@ -12,8 +15,7 @@ const PALETTE = ["#e8a33d", "#5b7c8d", "#c0685a", "#7c9473", "#8b7bb0", "#c99a4a
 const colorFor = (str) => PALETTE[[...str].reduce((a, c) => a + c.charCodeAt(0), 0) % PALETTE.length];
 const getTags = (s) => (Array.isArray(s.tags) ? s.tags : s.category ? [s.category] : []);
 
-// --- storage: uses localStorage when available (e.g. once hosted as a real site),
-// falls back to in-memory storage for this session if it isn't.
+// --- storage: uses localStorage when available, falls back to in-memory for this session.
 const memoryStore = {};
 function storageGet(key) {
   try {
@@ -51,7 +53,6 @@ function loadTabs() {
     /* fall through */
   }
 
-  // migrate old data (single shared library) into a "มังฮวา" tab
   try {
     const oldSeries = storageGet("shiori-series");
     if (oldSeries) {
@@ -59,7 +60,7 @@ function loadTabs() {
       const tabId = uid();
       storageSet(`shiori-series-${tabId}`, oldSeries);
       storageSet(`shiori-opened-${tabId}`, oldOpened || "{}");
-      const tabs = [{ id: tabId, name: "มังฮวา" }];
+      const tabs = [{ id: tabId, name: "มังฮวา", bgImage: "" }];
       storageSet("shiori-tabs", JSON.stringify(tabs));
       storageSet("shiori-active-tab", tabId);
       storageRemove("shiori-series");
@@ -70,23 +71,19 @@ function loadTabs() {
     /* fall through */
   }
 
-  // fresh install: start with one empty tab
   const tabId = uid();
-  const tabs = [{ id: tabId, name: "มังฮวา" }];
+  const tabs = [{ id: tabId, name: "มังฮวา", bgImage: "" }];
   storageSet("shiori-tabs", JSON.stringify(tabs));
   storageSet("shiori-active-tab", tabId);
   return tabs;
 }
 
-// --- number detection in a URL: returns [{ value, start, end }, ...]
 function extractNumbers(str) {
   if (!str) return [];
   const out = [];
   const re = /\d+/g;
   let m;
-  while ((m = re.exec(str)) !== null) {
-    out.push({ value: m[0], start: m.index, end: m.index + m[0].length });
-  }
+  while ((m = re.exec(str)) !== null) out.push({ value: m[0], start: m.index, end: m.index + m[0].length });
   return out;
 }
 
@@ -103,24 +100,29 @@ function displayProgress(s) {
   return s.note || "";
 }
 
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("read failed"));
+    reader.onload = () => resolve(reader.result);
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function Shiori() {
   const [tabs, setTabs] = useState(() => loadTabs());
-  const [activeTabId, setActiveTabId] = useState(() => {
-    try {
-      const saved = storageGet("shiori-active-tab");
-      if (saved) return saved;
-    } catch {
-      /* ignore */
-    }
-    return null;
-  });
+  const [activeTabId, setActiveTabId] = useState(() => storageGet("shiori-active-tab") || null);
   const [series, setSeries] = useState([]);
   const [opened, setOpened] = useState({});
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
   const [activeTags, setActiveTags] = useState([]);
   const [modal, setModal] = useState(null);
-  const [tabModalOpen, setTabModalOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [newTabPrompt, setNewTabPrompt] = useState(false);
+  const [editTabOpen, setEditTabOpen] = useState(false);
+  const [backupOpen, setBackupOpen] = useState(false);
 
   useEffect(() => {
     if (!activeTabId && tabs[0]) setActiveTabId(tabs[0].id);
@@ -142,6 +144,7 @@ export default function Shiori() {
     }
     setActiveTags([]);
     setQuery("");
+    setSearchOpen(false);
   }, [activeTabId]);
 
   const saveSeries = useCallback(
@@ -161,18 +164,42 @@ export default function Shiori() {
     [activeTabId]
   );
 
+  function persistTabs(next) {
+    setTabs(next);
+    storageSet("shiori-tabs", JSON.stringify(next));
+  }
+
   function switchTab(id) {
     setActiveTabId(id);
     storageSet("shiori-active-tab", id);
+    setDrawerOpen(false);
   }
 
   function addTab(name) {
-    const newTab = { id: uid(), name: name.trim() || "แท็บใหม่" };
-    const next = [...tabs, newTab];
-    setTabs(next);
-    storageSet("shiori-tabs", JSON.stringify(next));
+    const newTab = { id: uid(), name: name.trim() || "แท็บใหม่", bgImage: "" };
+    persistTabs([...tabs, newTab]);
     switchTab(newTab.id);
-    setTabModalOpen(false);
+    setNewTabPrompt(false);
+  }
+
+  function saveActiveTab(patch) {
+    persistTabs(tabs.map((t) => (t.id === activeTabId ? { ...t, ...patch } : t)));
+    setEditTabOpen(false);
+  }
+
+  function deleteActiveTab() {
+    const remaining = tabs.filter((t) => t.id !== activeTabId);
+    storageRemove(`shiori-series-${activeTabId}`);
+    storageRemove(`shiori-opened-${activeTabId}`);
+    if (remaining.length === 0) {
+      const freshId = uid();
+      persistTabs([{ id: freshId, name: "มังฮวา", bgImage: "" }]);
+      switchTab(freshId);
+    } else {
+      persistTabs(remaining);
+      switchTab(remaining[0].id);
+    }
+    setEditTabOpen(false);
   }
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
@@ -235,49 +262,94 @@ export default function Shiori() {
     saveSeries(series.map((x) => (x.id === s.id ? { ...x, episode: next } : x)));
   }
 
+  function exportBackup() {
+    const data = {};
+    tabs.forEach((t) => {
+      data[t.id] = {
+        series: JSON.parse(storageGet(`shiori-series-${t.id}`) || "[]"),
+        opened: JSON.parse(storageGet(`shiori-opened-${t.id}`) || "{}"),
+      };
+    });
+    const payload = { exportedAt: Date.now(), tabs, data };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const d = new Date();
+    const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+    a.href = url;
+    a.download = `shiori-backup-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function importBackup(file, onDone) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const payload = JSON.parse(reader.result);
+        if (!Array.isArray(payload.tabs) || typeof payload.data !== "object") throw new Error("invalid");
+        payload.tabs.forEach((t) => {
+          const d = payload.data[t.id] || { series: [], opened: {} };
+          storageSet(`shiori-series-${t.id}`, JSON.stringify(d.series || []));
+          storageSet(`shiori-opened-${t.id}`, JSON.stringify(d.opened || {}));
+        });
+        storageSet("shiori-tabs", JSON.stringify(payload.tabs));
+        storageSet("shiori-active-tab", payload.tabs[0]?.id || "");
+        onDone(true);
+      } catch {
+        onDone(false);
+      }
+    };
+    reader.onerror = () => onDone(false);
+    reader.readAsText(file);
+  }
+
   return (
     <div className="min-h-screen font-body" style={{ backgroundColor: "#14171f", color: "#e8e4d9" }}>
       <style>{FONT_STYLE}</style>
 
       <header className="sticky top-0 z-20 border-b" style={{ backgroundColor: "#14171fee", borderColor: "#2a2f3c", backdropFilter: "blur(6px)" }}>
-        <div className="max-w-5xl mx-auto px-5 pt-4">
-          <div className="flex gap-2 overflow-x-auto pb-3">
-            {tabs.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => switchTab(t.id)}
-                className="flex-shrink-0 px-4 py-1.5 rounded-full text-sm font-medium font-display"
-                style={t.id === activeTabId ? { backgroundColor: "#e8a33d", color: "#14171f" } : { backgroundColor: "#1e2230", color: "#a8afc0", border: "1px solid #2a2f3c" }}
-              >
-                {t.name}
+        <div className="max-w-5xl mx-auto px-5 py-3 flex items-center gap-2">
+          {!searchOpen ? (
+            <>
+              <button onClick={() => setDrawerOpen(true)} className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0" style={{ backgroundColor: "#1e2230", border: "1px solid #2a2f3c" }}>
+                <Menu size={18} style={{ color: "#e8e4d9" }} />
               </button>
-            ))}
-            <button
-              onClick={() => setTabModalOpen(true)}
-              className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center"
-              style={{ backgroundColor: "#1e2230", color: "#a8afc0", border: "1px solid #2a2f3c" }}
-            >
-              <Plus size={15} />
-            </button>
-          </div>
-        </div>
-        <div className="max-w-5xl mx-auto px-5 pb-4 flex items-center gap-3">
-          <button
-            onClick={() => setModal({ mode: "add" })}
-            className="flex-shrink-0 flex items-center gap-1.5 px-3.5 py-2 rounded-md text-sm font-medium"
-            style={{ backgroundColor: "#e8a33d", color: "#14171f" }}
-          >
-            <Plus size={16} /> เพิ่มเรื่อง
-          </button>
-          <div className="flex-1 relative min-w-[120px]">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: "#7a8194" }} />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              className="w-full pl-9 pr-3 py-2 rounded-md text-sm outline-none"
-              style={{ backgroundColor: "#1e2230", color: "#e8e4d9", border: "1px solid #2a2f3c" }}
-            />
-          </div>
+              <HeaderTabChip tab={activeTab} />
+              <button onClick={() => setSearchOpen(true)} className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0" style={{ backgroundColor: "#1e2230", border: "1px solid #2a2f3c" }}>
+                <Search size={16} style={{ color: "#a8afc0" }} />
+              </button>
+              <button
+                onClick={() => setModal({ mode: "add" })}
+                className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0"
+                style={{ backgroundColor: "#e8a33d" }}
+              >
+                <Plus size={18} style={{ color: "#14171f" }} />
+              </button>
+            </>
+          ) : (
+            <div className="flex-1 flex items-center gap-2">
+              <div className="flex-1 relative">
+                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: "#7a8194" }} />
+                <input
+                  autoFocus
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  className="w-full pl-9 pr-3 py-2 rounded-full text-sm outline-none"
+                  style={{ backgroundColor: "#1e2230", color: "#e8e4d9", border: "1px solid #2a2f3c" }}
+                />
+              </div>
+              <button
+                onClick={() => { setSearchOpen(false); setQuery(""); }}
+                className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0"
+                style={{ backgroundColor: "#1e2230", border: "1px solid #2a2f3c" }}
+              >
+                <X size={16} style={{ color: "#a8afc0" }} />
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -288,7 +360,7 @@ export default function Shiori() {
           </div>
         )}
 
-        {series.length === 0 && <EmptyState tabName={activeTab?.name} onAdd={() => setModal({ mode: "add" })} />}
+        {series.length === 0 && <EmptyState onAdd={() => setModal({ mode: "add" })} />}
 
         {series.length > 0 && (
           <>
@@ -323,11 +395,102 @@ export default function Shiori() {
         )}
       </main>
 
-      {modal && (
-        <FormModal mode={modal.mode} item={modal.item} existingTags={allTags} onClose={() => setModal(null)} onSave={saveItem} />
+      {modal && <FormModal mode={modal.mode} item={modal.item} existingTags={allTags} onClose={() => setModal(null)} onSave={saveItem} />}
+
+      {drawerOpen && (
+        <Drawer
+          tabs={tabs}
+          activeTabId={activeTabId}
+          onSwitch={switchTab}
+          onAddTabClick={() => { setDrawerOpen(false); setNewTabPrompt(true); }}
+          onEditActiveTab={() => { setDrawerOpen(false); setEditTabOpen(true); }}
+          onOpenBackup={() => { setDrawerOpen(false); setBackupOpen(true); }}
+          onClose={() => setDrawerOpen(false)}
+        />
       )}
 
-      {tabModalOpen && <NewTabModal onClose={() => setTabModalOpen(false)} onCreate={addTab} />}
+      {newTabPrompt && <NewTabModal onClose={() => setNewTabPrompt(false)} onCreate={addTab} />}
+
+      {editTabOpen && activeTab && (
+        <EditTabModal tab={activeTab} onClose={() => setEditTabOpen(false)} onSave={saveActiveTab} onDelete={deleteActiveTab} />
+      )}
+
+      {backupOpen && <BackupModal onClose={() => setBackupOpen(false)} onExport={exportBackup} onImportFile={importBackup} />}
+    </div>
+  );
+}
+
+function HeaderTabChip({ tab }) {
+  if (!tab) return <div className="flex-1" />;
+  return (
+    <div className="flex-1 h-9 rounded-full overflow-hidden relative flex items-center justify-center min-w-0" style={{ backgroundColor: tab.bgImage ? "#1e2230" : colorFor(tab.name) }}>
+      {tab.bgImage && (
+        <>
+          <img src={tab.bgImage} alt="" className="absolute inset-0 w-full h-full object-cover" />
+          <div className="absolute inset-0" style={{ backgroundColor: "#000", opacity: 0.35 }} />
+        </>
+      )}
+      <span
+        className="relative font-display text-sm font-bold truncate px-3"
+        style={{ color: tab.bgImage ? "#fff" : "#14171f" }}
+      >
+        {tab.name}
+      </span>
+    </div>
+  );
+}
+
+function TabThumb({ tab }) {
+  if (!tab) return null;
+  return (
+    <div className="w-9 h-9 rounded-full overflow-hidden flex-shrink-0 flex items-center justify-center" style={{ backgroundColor: tab.bgImage ? "#1e2230" : colorFor(tab.name) }}>
+      {tab.bgImage ? (
+        <img src={tab.bgImage} className="w-full h-full object-cover" alt="" />
+      ) : (
+        <span className="text-xs font-bold" style={{ color: "#14171f" }}>{tab.name.trim().charAt(0).toUpperCase()}</span>
+      )}
+    </div>
+  );
+}
+
+function Drawer({ tabs, activeTabId, onSwitch, onAddTabClick, onEditActiveTab, onOpenBackup, onClose }) {
+  const activeTab = tabs.find((t) => t.id === activeTabId);
+  const others = tabs.filter((t) => t.id !== activeTabId);
+  return (
+    <div className="fixed inset-0 z-40 flex" onClick={onClose}>
+      <div className="absolute inset-0" style={{ backgroundColor: "#000a" }} />
+      <div className="relative w-72 max-w-[82%] h-full overflow-y-auto flex flex-col" style={{ backgroundColor: "#1e2230" }} onClick={(e) => e.stopPropagation()}>
+        <div className="p-4 border-b" style={{ borderColor: "#2a2f3c" }}>
+          <div className="flex items-center gap-3">
+            <TabThumb tab={activeTab} />
+            <p className="flex-1 font-display text-base font-bold truncate" style={{ color: "#f0ead8" }}>{activeTab?.name}</p>
+            <button onClick={onEditActiveTab} className="p-2 rounded-full flex-shrink-0" style={{ backgroundColor: "#14171f" }}>
+              <Settings size={15} style={{ color: "#a8afc0" }} />
+            </button>
+          </div>
+        </div>
+
+        <div className="py-2 flex-1">
+          {others.map((t) => (
+            <button key={t.id} onClick={() => onSwitch(t.id)} className="w-full flex items-center gap-3 px-4 py-3 text-left">
+              <TabThumb tab={t} />
+              <span className="text-sm truncate" style={{ color: "#e8e4d9" }}>{t.name}</span>
+            </button>
+          ))}
+          <button onClick={onAddTabClick} className="w-full flex items-center gap-3 px-4 py-3 text-left">
+            <div className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0" style={{ border: "1px dashed #3a4155" }}>
+              <Plus size={15} style={{ color: "#7a8194" }} />
+            </div>
+            <span className="text-sm" style={{ color: "#a8afc0" }}>เพิ่มแท็บใหม่</span>
+          </button>
+        </div>
+
+        <div className="p-4 border-t" style={{ borderColor: "#2a2f3c" }}>
+          <button onClick={onOpenBackup} className="w-full flex items-center gap-2 px-3 py-2.5 rounded-md text-sm" style={{ backgroundColor: "#14171f", color: "#a8afc0" }}>
+            <Download size={14} /> สำรองข้อมูล
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -335,7 +498,7 @@ export default function Shiori() {
 function NewTabModal({ onClose, onCreate }) {
   const [name, setName] = useState("");
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center p-4" style={{ backgroundColor: "#000a" }}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: "#000a" }}>
       <div className="w-full max-w-xs rounded-lg p-5" style={{ backgroundColor: "#1e2230", border: "1px solid #2a2f3c" }}>
         <h3 className="font-display text-lg font-bold mb-3" style={{ color: "#f0ead8" }}>ตั้งชื่อแท็บใหม่</h3>
         <input
@@ -348,15 +511,158 @@ function NewTabModal({ onClose, onCreate }) {
         />
         <div className="flex gap-2">
           <button onClick={onClose} className="flex-1 py-2 rounded-md text-sm" style={{ backgroundColor: "#2a2f3c", color: "#e8e4d9" }}>ยกเลิก</button>
-          <button
-            onClick={() => name.trim() && onCreate(name)}
-            disabled={!name.trim()}
-            className="flex-1 py-2 rounded-md text-sm font-medium disabled:opacity-40"
-            style={{ backgroundColor: "#e8a33d", color: "#14171f" }}
-          >
+          <button onClick={() => name.trim() && onCreate(name)} disabled={!name.trim()} className="flex-1 py-2 rounded-md text-sm font-medium disabled:opacity-40" style={{ backgroundColor: "#e8a33d", color: "#14171f" }}>
             สร้าง
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function EditTabModal({ tab, onClose, onSave, onDelete }) {
+  const [name, setName] = useState(tab.name);
+  const [bgImage, setBgImage] = useState(tab.bgImage || "");
+  const [pendingImage, setPendingImage] = useState(null);
+  const [confirmStep, setConfirmStep] = useState(0);
+  const fileRef = useRef(null);
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !file.type.startsWith("image/")) return;
+    const dataUrl = await fileToDataUrl(file);
+    setPendingImage(dataUrl);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: "#000a" }}>
+      <div className="w-full max-w-sm rounded-lg p-5" style={{ backgroundColor: "#1e2230", border: "1px solid #2a2f3c" }}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-display text-lg font-bold" style={{ color: "#f0ead8" }}>ตั้งค่าแท็บ</h3>
+          <button onClick={onClose}><X size={18} style={{ color: "#7a8194" }} /></button>
+        </div>
+
+        <Field label="ชื่อแท็บ">
+          <input value={name} onChange={(e) => setName(e.target.value)} style={inputStyle} />
+        </Field>
+
+        <Field label="ภาพพื้นหลัง">
+          <div className="flex items-center gap-2 flex-wrap">
+            {bgImage && (
+              <div className="w-16 h-10 rounded overflow-hidden flex-shrink-0" style={{ backgroundColor: "#14171f" }}>
+                <img src={bgImage} className="w-full h-full object-cover" alt="" />
+              </div>
+            )}
+            <button type="button" onClick={() => fileRef.current?.click()} className="flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-medium" style={{ backgroundColor: "#2a2f3c", color: "#a8afc0", border: "1px solid #3a4155" }}>
+              <ImagePlus size={13} /> อัพโหลด
+            </button>
+            <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} className="hidden" />
+            {bgImage && (
+              <button type="button" onClick={() => setBgImage("")} className="text-[11px] underline" style={{ color: "#7a8194" }}>
+                ลบรูป
+              </button>
+            )}
+          </div>
+        </Field>
+
+        {confirmStep === 0 && (
+          <button onClick={() => setConfirmStep(1)} className="w-full py-2 rounded-md text-sm font-medium mt-1 mb-4" style={{ backgroundColor: "#3a2020", color: "#f0b4b4" }}>
+            ลบแท็บนี้
+          </button>
+        )}
+        {confirmStep === 1 && (
+          <div className="mb-4 p-3 rounded-md" style={{ backgroundColor: "#3a2020" }}>
+            <p className="text-xs mb-2" style={{ color: "#f0b4b4" }}>ลบแท็บนี้แล้ว เรื่องทั้งหมดในแท็บนี้จะหายไปด้วย ยืนยันไหม?</p>
+            <div className="flex gap-2">
+              <button onClick={() => setConfirmStep(0)} className="flex-1 py-1.5 rounded text-xs" style={{ backgroundColor: "#2a2f3c", color: "#e8e4d9" }}>ยกเลิก</button>
+              <button onClick={() => setConfirmStep(2)} className="flex-1 py-1.5 rounded text-xs font-medium" style={{ backgroundColor: "#c0392b", color: "#fff" }}>ลบต่อ</button>
+            </div>
+          </div>
+        )}
+        {confirmStep === 2 && (
+          <div className="mb-4 p-3 rounded-md" style={{ backgroundColor: "#3a2020" }}>
+            <p className="text-xs mb-2" style={{ color: "#f0b4b4" }}>ยืนยันอีกครั้ง — ลบแล้วกู้คืนไม่ได้ ต้องการลบถาวรใช่ไหม?</p>
+            <div className="flex gap-2">
+              <button onClick={() => setConfirmStep(0)} className="flex-1 py-1.5 rounded text-xs" style={{ backgroundColor: "#2a2f3c", color: "#e8e4d9" }}>ยกเลิก</button>
+              <button onClick={onDelete} className="flex-1 py-1.5 rounded text-xs font-medium" style={{ backgroundColor: "#c0392b", color: "#fff" }}>ยืนยันลบถาวร</button>
+            </div>
+          </div>
+        )}
+
+        <div className="flex gap-2">
+          <button onClick={onClose} className="flex-1 py-2 rounded-md text-sm" style={{ backgroundColor: "#2a2f3c", color: "#e8e4d9" }}>ยกเลิก</button>
+          <button onClick={() => onSave({ name: name.trim() || tab.name, bgImage })} disabled={!name.trim()} className="flex-1 py-2 rounded-md text-sm font-medium disabled:opacity-40" style={{ backgroundColor: "#e8a33d", color: "#14171f" }}>
+            บันทึก
+          </button>
+        </div>
+      </div>
+
+      {pendingImage && (
+        <CoverAdjustModal
+          src={pendingImage}
+          frameW={300}
+          frameH={110}
+          onCancel={() => setPendingImage(null)}
+          onConfirm={(dataUrl) => { setBgImage(dataUrl); setPendingImage(null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function BackupModal({ onClose, onExport, onImportFile }) {
+  const fileRef = useRef(null);
+  const [msg, setMsg] = useState("");
+  const [confirmFile, setConfirmFile] = useState(null);
+
+  function handleFileChosen(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setConfirmFile(file);
+    setMsg("");
+  }
+
+  function doImport() {
+    onImportFile(confirmFile, (ok) => {
+      if (ok) {
+        window.location.reload();
+      } else {
+        setMsg("ไฟล์ไม่ถูกต้อง ไม่สามารถนำเข้าได้");
+        setConfirmFile(null);
+      }
+    });
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: "#000a" }}>
+      <div className="w-full max-w-xs rounded-lg p-5" style={{ backgroundColor: "#1e2230", border: "1px solid #2a2f3c" }}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-display text-lg font-bold" style={{ color: "#f0ead8" }}>สำรองข้อมูล</h3>
+          <button onClick={onClose}><X size={18} style={{ color: "#7a8194" }} /></button>
+        </div>
+
+        <button onClick={onExport} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-md text-sm font-medium mb-3" style={{ backgroundColor: "#e8a33d", color: "#14171f" }}>
+          <Download size={15} /> ส่งออกข้อมูล
+        </button>
+
+        <button onClick={() => fileRef.current?.click()} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-md text-sm font-medium" style={{ backgroundColor: "#2a2f3c", color: "#e8e4d9" }}>
+          <Upload size={15} /> นำเข้าข้อมูล
+        </button>
+        <input ref={fileRef} type="file" accept="application/json" onChange={handleFileChosen} className="hidden" />
+
+        {msg && <p className="text-[11px] mt-2" style={{ color: "#e0a0a0" }}>{msg}</p>}
+
+        {confirmFile && (
+          <div className="mt-3 p-3 rounded-md" style={{ backgroundColor: "#3a2020" }}>
+            <p className="text-xs mb-2" style={{ color: "#f0b4b4" }}>นำเข้าไฟล์นี้จะแทนที่ข้อมูลปัจจุบันทั้งหมด ต้องการดำเนินการต่อไหม?</p>
+            <div className="flex gap-2">
+              <button onClick={() => setConfirmFile(null)} className="flex-1 py-1.5 rounded text-xs" style={{ backgroundColor: "#2a2f3c", color: "#e8e4d9" }}>ยกเลิก</button>
+              <button onClick={doImport} className="flex-1 py-1.5 rounded text-xs font-medium" style={{ backgroundColor: "#c0392b", color: "#fff" }}>ยืนยันนำเข้า</button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -382,11 +688,11 @@ function SectionTitle({ icon, text }) {
   );
 }
 
-function EmptyState({ tabName, onAdd }) {
+function EmptyState({ onAdd }) {
   return (
-    <div className="py-24 text-center">
+    <div className="py-20 text-center">
       <BookOpen size={40} className="mx-auto mb-4" style={{ color: "#3a4155" }} />
-      <p className="font-display text-xl font-bold mb-1" style={{ color: "#f0ead8" }}>{tabName ? `"${tabName}" ยังว่างอยู่` : "ยังว่างอยู่"}</p>
+      <p className="font-display text-xl font-bold mb-1" style={{ color: "#f0ead8" }}>ยังว่างอยู่</p>
       <p className="text-sm mb-5" style={{ color: "#7a8194" }}>เพิ่มลิงก์เรื่องแรกที่คุณติดตามอยู่</p>
       <button onClick={onAdd} className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium" style={{ backgroundColor: "#e8a33d", color: "#14171f" }}>
         <Plus size={16} /> เพิ่มเรื่อง
@@ -396,9 +702,7 @@ function EmptyState({ tabName, onAdd }) {
 }
 
 function Cover({ s }) {
-  if (s.coverUrl) {
-    return <img src={s.coverUrl} alt={s.title} className="w-full h-full object-cover" />;
-  }
+  if (s.coverUrl) return <img src={s.coverUrl} alt={s.title} className="w-full h-full object-cover" />;
   const tags = getTags(s);
   return (
     <div className="w-full h-full flex items-center justify-center" style={{ backgroundColor: colorFor(tags[0] || s.title) }}>
@@ -482,19 +786,8 @@ function SeriesCard({ s, onOpen, onEdit, onDelete, onBump }) {
   );
 }
 
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("read failed"));
-    reader.onload = () => resolve(reader.result);
-    reader.readAsDataURL(file);
-  });
-}
-
-// --- pan-to-reposition cover cropper (no zoom): drag the image behind a fixed 3:4 frame
-function CoverAdjustModal({ src, onCancel, onConfirm }) {
-  const frameW = 220;
-  const frameH = 293; // 3:4
+// --- pan-to-reposition image cropper (no zoom), reused for series covers and tab banners
+function CoverAdjustModal({ src, frameW = 220, frameH = 293, onCancel, onConfirm }) {
   const outScale = 2;
   const imgElRef = useRef(null);
   const dragRef = useRef(null);
@@ -514,7 +807,7 @@ function CoverAdjustModal({ src, onCancel, onConfirm }) {
       setReady(true);
     };
     img.src = src;
-  }, [src]);
+  }, [src, frameW, frameH]);
 
   function clamp(val, dim, frame) {
     const min = frame - dim;
@@ -548,7 +841,7 @@ function CoverAdjustModal({ src, onCancel, onConfirm }) {
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center p-4" style={{ backgroundColor: "#000c" }}>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" style={{ backgroundColor: "#000c" }}>
       <div className="rounded-lg p-4" style={{ backgroundColor: "#1e2230", border: "1px solid #2a2f3c" }}>
         <p className="text-xs mb-3 text-center" style={{ color: "#a8afc0" }}>ลากรูปเพื่อจัดตำแหน่งให้พอดีกรอบ</p>
         <div
@@ -560,12 +853,7 @@ function CoverAdjustModal({ src, onCancel, onConfirm }) {
           onPointerCancel={onPointerUp}
         >
           {ready && (
-            <img
-              src={src}
-              draggable={false}
-              alt=""
-              style={{ position: "absolute", left: offset.x, top: offset.y, width: size.w, height: size.h, userSelect: "none" }}
-            />
+            <img src={src} draggable={false} alt="" style={{ position: "absolute", left: offset.x, top: offset.y, width: size.w, height: size.h, userSelect: "none" }} />
           )}
         </div>
         <div className="flex gap-2 mt-4">
@@ -651,13 +939,7 @@ function TagInput({ tags, setTags, existingTags }) {
       {suggestions.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mt-1.5">
           {suggestions.map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => addTag(t)}
-              className="px-2 py-0.5 rounded-full text-[11px]"
-              style={{ backgroundColor: "#14171f", color: "#7a8194", border: "1px solid #2a2f3c" }}
-            >
+            <button key={t} type="button" onClick={() => addTag(t)} className="px-2 py-0.5 rounded-full text-[11px]" style={{ backgroundColor: "#14171f", color: "#7a8194", border: "1px solid #2a2f3c" }}>
               + {t}
             </button>
           ))}
@@ -837,10 +1119,7 @@ function FormModal({ mode, item, existingTags, onClose, onSave }) {
         <CoverAdjustModal
           src={pendingImage}
           onCancel={() => setPendingImage(null)}
-          onConfirm={(dataUrl) => {
-            setCoverUrl(dataUrl);
-            setPendingImage(null);
-          }}
+          onConfirm={(dataUrl) => { setCoverUrl(dataUrl); setPendingImage(null); }}
         />
       )}
     </div>
