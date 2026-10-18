@@ -29,9 +29,17 @@ function storageSet(key, value) {
     window.localStorage.setItem(key, value);
     return true;
   } catch {
+    // localStorage failed (quota full or blocked): do NOT pretend it was saved.
     memoryStore[key] = value;
-    return true;
+    return false;
   }
+}
+
+// ask the browser not to evict our data
+try {
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+} catch {
+  /* ignore */
 }
 function storageRemove(key) {
   try {
@@ -151,7 +159,7 @@ export default function Shiori() {
     (next) => {
       setSeries(next);
       const ok = storageSet(`shiori-series-${activeTabId}`, JSON.stringify(next));
-      if (!ok) setError("บันทึกไม่สำเร็จ ลองอีกครั้ง");
+      if (!ok) setError("บันทึกไม่สำเร็จ พื้นที่เก็บข้อมูลเต็ม ลองลบรูปปกบางเรื่อง หรือใช้รูปที่เล็กลง");
     },
     [activeTabId]
   );
@@ -159,14 +167,16 @@ export default function Shiori() {
   const saveOpened = useCallback(
     (next) => {
       setOpened(next);
-      storageSet(`shiori-opened-${activeTabId}`, JSON.stringify(next));
+      const ok = storageSet(`shiori-opened-${activeTabId}`, JSON.stringify(next));
+      if (!ok) setError("บันทึกไม่สำเร็จ พื้นที่เก็บข้อมูลเต็ม ลองลบรูปปกบางเรื่อง");
     },
     [activeTabId]
   );
 
   function persistTabs(next) {
     setTabs(next);
-    storageSet("shiori-tabs", JSON.stringify(next));
+    const ok = storageSet("shiori-tabs", JSON.stringify(next));
+    if (!ok) setError("บันทึกแท็บไม่สำเร็จ พื้นที่เก็บข้อมูลเต็ม ลองใช้รูปพื้นหลังที่เล็กลง");
   }
 
   function switchTab(id) {
@@ -788,7 +798,7 @@ function SeriesCard({ s, onOpen, onEdit, onDelete, onBump }) {
 
 // --- pan-to-reposition image cropper (no zoom), reused for series covers and tab banners
 function CoverAdjustModal({ src, frameW = 220, frameH = 293, onCancel, onConfirm }) {
-  const outScale = 2;
+  const outScale = 1.2;
   const imgElRef = useRef(null);
   const dragRef = useRef(null);
   const [ready, setReady] = useState(false);
@@ -837,7 +847,7 @@ function CoverAdjustModal({ src, frameW = 220, frameH = 293, onCancel, onConfirm
     canvas.height = frameH * outScale;
     const ctx = canvas.getContext("2d");
     ctx.drawImage(imgElRef.current, offset.x * outScale, offset.y * outScale, size.w * outScale, size.h * outScale);
-    onConfirm(canvas.toDataURL("image/jpeg", 0.82));
+    onConfirm(canvas.toDataURL("image/jpeg", 0.7));
   }
 
   return (
