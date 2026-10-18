@@ -27,12 +27,79 @@ function storageGet(key) {
 function storageSet(key, value) {
   try {
     window.localStorage.setItem(key, value);
-    return true;
+    // read back to make sure it really stuck
+    return window.localStorage.getItem(key) === value;
   } catch {
     // localStorage failed (quota full or blocked): do NOT pretend it was saved.
     memoryStore[key] = value;
     return false;
   }
+}
+
+const APP_VERSION = "v3-diag";
+
+// leave a marker the first time the app runs, so we can later tell if storage was wiped
+try {
+  if (!window.localStorage.getItem("shiori-probe")) {
+    window.localStorage.setItem("shiori-probe", String(Date.now()));
+  }
+} catch {
+  /* ignore */
+}
+
+async function runDiagnostics() {
+  const lines = [`เวอร์ชันแอป: ${APP_VERSION}`, `ที่อยู่เว็บ: ${window.location.origin}`];
+  try {
+    window.localStorage.setItem("shiori-test", "1");
+    const ok = window.localStorage.getItem("shiori-test") === "1";
+    window.localStorage.removeItem("shiori-test");
+    lines.push(`เขียน/อ่านที่เก็บข้อมูล: ${ok ? "ปกติ" : "ผิดปกติ (เขียนแล้วอ่านไม่เจอ)"}`);
+  } catch (e) {
+    lines.push(`เขียน/อ่านที่เก็บข้อมูล: ใช้ไม่ได้ (${e && e.name})`);
+  }
+  try {
+    const p = window.localStorage.getItem("shiori-probe");
+    if (p) {
+      const mins = Math.round((Date.now() - Number(p)) / 60000);
+      lines.push(`เครื่องหมายตรวจสอบ: ยังอยู่ (สร้างเมื่อ ${mins} นาทีก่อน)`);
+    } else {
+      lines.push("เครื่องหมายตรวจสอบ: หายไป (ข้อมูลถูกล้าง)");
+    }
+  } catch {
+    lines.push("เครื่องหมายตรวจสอบ: อ่านไม่ได้");
+  }
+  try {
+    let total = 0;
+    const parts = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (!k || !k.startsWith("shiori")) continue;
+      const size = (window.localStorage.getItem(k) || "").length;
+      total += size;
+      if (k.startsWith("shiori-series-")) {
+        let n = 0;
+        try { n = JSON.parse(window.localStorage.getItem(k)).length; } catch { /* ignore */ }
+        parts.push(`${k.slice(0, 20)}… ${n} เรื่อง ${Math.round(size / 1024)}KB`);
+      }
+    }
+    lines.push(`ข้อมูลแอปรวม: ${Math.round(total / 1024)}KB`);
+    parts.forEach((p) => lines.push(p));
+  } catch {
+    lines.push("นับข้อมูลไม่ได้");
+  }
+  try {
+    if (navigator.storage && navigator.storage.persist) {
+      const persisted = await navigator.storage.persisted();
+      lines.push(`ขอเก็บถาวร: ${persisted ? "ได้รับ" : "ไม่ได้รับ (เบราว์เซอร์ลบได้เมื่อพื้นที่น้อย)"}`);
+    }
+    if (navigator.storage && navigator.storage.estimate) {
+      const est = await navigator.storage.estimate();
+      lines.push(`พื้นที่ใช้ ${Math.round((est.usage || 0) / 1024)}KB จาก ${Math.round((est.quota || 0) / 1048576)}MB`);
+    }
+  } catch {
+    /* ignore */
+  }
+  return lines;
 }
 
 // ask the browser not to evict our data
@@ -625,6 +692,7 @@ function BackupModal({ onClose, onExport, onImportFile }) {
   const fileRef = useRef(null);
   const [msg, setMsg] = useState("");
   const [confirmFile, setConfirmFile] = useState(null);
+  const [diag, setDiag] = useState(null);
 
   function handleFileChosen(e) {
     const file = e.target.files?.[0];
@@ -661,6 +729,15 @@ function BackupModal({ onClose, onExport, onImportFile }) {
           <Upload size={15} /> นำเข้าข้อมูล
         </button>
         <input ref={fileRef} type="file" accept="application/json" onChange={handleFileChosen} className="hidden" />
+
+        <button onClick={async () => setDiag(await runDiagnostics())} className="w-full mt-3 py-2 rounded-md text-xs" style={{ backgroundColor: "transparent", color: "#7a8194", border: "1px dashed #2a2f3c" }}>
+          ตรวจสถานะการเก็บข้อมูล
+        </button>
+        {diag && (
+          <div className="mt-2 p-2 rounded-md text-[11px] leading-relaxed break-all" style={{ backgroundColor: "#14171f", color: "#a8afc0" }}>
+            {diag.map((l, i) => <div key={i}>{l}</div>)}
+          </div>
+        )}
 
         {msg && <p className="text-[11px] mt-2" style={{ color: "#e0a0a0" }}>{msg}</p>}
 
