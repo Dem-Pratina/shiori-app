@@ -15,105 +15,242 @@ const PALETTE = ["#e8a33d", "#5b7c8d", "#c0685a", "#7c9473", "#8b7bb0", "#c99a4a
 const colorFor = (str) => PALETTE[[...str].reduce((a, c) => a + c.charCodeAt(0), 0) % PALETTE.length];
 const getTags = (s) => (Array.isArray(s.tags) ? s.tags : s.category ? [s.category] : []);
 
-// --- storage: uses localStorage when available, falls back to in-memory for this session.
-const memoryStore = {};
-function storageGet(key) {
+// --- storage: IndexedDB (hundreds of MB) behind an in-memory cache, so the rest of the app stays synchronous.
+// Old localStorage data is moved into IndexedDB once, automatically. Falls back to localStorage if IndexedDB is unavailable.
+const APP_VERSION = "v4-idb";
+const DB_NAME = "shiori-db";
+const STORE = "kv";
+const cache = {};
+let idb = null;
+let storageBackend = "memory";
+let storageErrorHandler = null;
+let initPromise = null;
+const pendingWrites = new Set();
+
+function setStorageErrorHandler(fn) {
+  storageErrorHandler = fn;
+}
+function reportStorageError() {
+  if (storageErrorHandler) storageErrorHandler("บันทึกไม่สำเร็จ พื้นที่เก็บข้อมูลของเครื่องเต็มหรือถูกบล็อก ลองสำรองข้อมูลไว้ก่อน");
+}
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) {
+      reject(new Error("no indexedDB"));
+      return;
+    }
+    const req = window.indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+    req.onblocked = () => reject(new Error("blocked"));
+  });
+}
+
+function idbReadAll(db) {
+  return new Promise((resolve, reject) => {
+    const out = {};
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).openCursor();
+    req.onsuccess = () => {
+      const cur = req.result;
+      if (cur) {
+        out[cur.key] = cur.value;
+        cur.continue();
+      }
+    };
+    tx.oncomplete = () => resolve(out);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+function idbWrite(op) {
+  return new Promise((resolve, reject) => {
+    const tx = idb.transaction(STORE, "readwrite");
+    op(tx.objectStore(STORE));
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+function track(p) {
+  pendingWrites.add(p);
+  p.then(
+    () => pendingWrites.delete(p),
+    () => {
+      pendingWrites.delete(p);
+      reportStorageError();
+    }
+  );
+  return p;
+}
+
+function flushStorage() {
+  return Promise.allSettled([...pendingWrites]);
+}
+
+async function runInit() {
   try {
-    return window.localStorage.getItem(key);
+    idb = await openDb();
+    const all = await idbReadAll(idb);
+    Object.assign(cache, all);
+    storageBackend = "indexeddb";
   } catch {
-    return key in memoryStore ? memoryStore[key] : null;
+    idb = null;
+  }
+
+  try {
+    const keys = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (k && k.startsWith("shiori") && k !== "shiori-probe") keys.push(k);
+    }
+    if (idb) {
+      const toMove = keys.filter((k) => !(k in cache));
+      if (toMove.length > 0) {
+        const vals = {};
+        toMove.forEach((k) => {
+          vals[k] = window.localStorage.getItem(k);
+        });
+        // one atomic transaction: either everything is copied or nothing is
+        await idbWrite((s) => toMove.forEach((k) => s.put(vals[k], k)));
+        toMove.forEach((k) => {
+          cache[k] = vals[k];
+        });
+      }
+      // only after the copy is committed do we free the old localStorage space
+      keys.forEach((k) => {
+        if (k in cache) window.localStorage.removeItem(k);
+      });
+    } else {
+      keys.forEach((k) => {
+        cache[k] = window.localStorage.getItem(k);
+      });
+      storageBackend = "localstorage";
+    }
+  } catch {
+    /* if migration fails, old data stays untouched in localStorage */
+  }
+
+  if (!("shiori-probe" in cache)) storageSet("shiori-probe", String(Date.now()));
+  try {
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+  } catch {
+    /* ignore */
   }
 }
+
+function initStorage() {
+  if (!initPromise) initPromise = runInit();
+  return initPromise;
+}
+
+function storageGet(key) {
+  return key in cache ? cache[key] : null;
+}
+
 function storageSet(key, value) {
+  cache[key] = value;
+  if (idb) {
+    try {
+      track(idbWrite((s) => s.put(value, key)));
+      return true;
+    } catch {
+      return false;
+    }
+  }
   try {
     window.localStorage.setItem(key, value);
-    // read back to make sure it really stuck
     return window.localStorage.getItem(key) === value;
   } catch {
-    // localStorage failed (quota full or blocked): do NOT pretend it was saved.
-    memoryStore[key] = value;
     return false;
   }
 }
 
-const APP_VERSION = "v3-diag";
-
-// leave a marker the first time the app runs, so we can later tell if storage was wiped
-try {
-  if (!window.localStorage.getItem("shiori-probe")) {
-    window.localStorage.setItem("shiori-probe", String(Date.now()));
+function storageRemove(key) {
+  delete cache[key];
+  if (idb) {
+    try {
+      track(idbWrite((s) => s.delete(key)));
+    } catch {
+      /* ignore */
+    }
+    return;
   }
-} catch {
-  /* ignore */
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    /* ignore */
+  }
 }
 
 async function runDiagnostics() {
   const lines = [`เวอร์ชันแอป: ${APP_VERSION}`, `ที่อยู่เว็บ: ${window.location.origin}`];
+  lines.push(`ที่เก็บข้อมูล: ${storageBackend === "indexeddb" ? "IndexedDB (พื้นที่ใหญ่)" : storageBackend === "localstorage" ? "localStorage (จำกัด 5MB)" : "ในหน่วยความจำเท่านั้น (ไม่ถาวร)"}`);
+
   try {
-    window.localStorage.setItem("shiori-test", "1");
-    const ok = window.localStorage.getItem("shiori-test") === "1";
-    window.localStorage.removeItem("shiori-test");
-    lines.push(`เขียน/อ่านที่เก็บข้อมูล: ${ok ? "ปกติ" : "ผิดปกติ (เขียนแล้วอ่านไม่เจอ)"}`);
-  } catch (e) {
-    lines.push(`เขียน/อ่านที่เก็บข้อมูล: ใช้ไม่ได้ (${e && e.name})`);
-  }
-  try {
-    const p = window.localStorage.getItem("shiori-probe");
-    if (p) {
-      const mins = Math.round((Date.now() - Number(p)) / 60000);
-      lines.push(`เครื่องหมายตรวจสอบ: ยังอยู่ (สร้างเมื่อ ${mins} นาทีก่อน)`);
+    await flushStorage();
+    const stamp = String(Date.now());
+    storageSet("shiori-test", stamp);
+    await flushStorage();
+    let back = null;
+    if (idb) {
+      const all = await idbReadAll(idb);
+      back = all["shiori-test"];
     } else {
-      lines.push("เครื่องหมายตรวจสอบ: หายไป (ข้อมูลถูกล้าง)");
+      back = window.localStorage.getItem("shiori-test");
     }
-  } catch {
-    lines.push("เครื่องหมายตรวจสอบ: อ่านไม่ได้");
+    storageRemove("shiori-test");
+    lines.push(`ทดสอบเขียน/อ่าน: ${back === stamp ? "ปกติ" : "ผิดปกติ (เขียนแล้วอ่านไม่เจอ)"}`);
+  } catch (e) {
+    lines.push(`ทดสอบเขียน/อ่าน: ล้มเหลว (${e && e.name})`);
   }
-  try {
-    let total = 0;
-    const parts = [];
-    for (let i = 0; i < window.localStorage.length; i++) {
-      const k = window.localStorage.key(i);
-      if (!k || !k.startsWith("shiori")) continue;
-      const size = (window.localStorage.getItem(k) || "").length;
-      total += size;
-      if (k.startsWith("shiori-series-")) {
-        let n = 0;
-        try { n = JSON.parse(window.localStorage.getItem(k)).length; } catch { /* ignore */ }
-        parts.push(`${k.slice(0, 20)}… ${n} เรื่อง ${Math.round(size / 1024)}KB`);
+
+  const p = storageGet("shiori-probe");
+  if (p) {
+    const mins = Math.round((Date.now() - Number(p)) / 60000);
+    lines.push(`เครื่องหมายตรวจสอบ: ยังอยู่ (สร้างเมื่อ ${mins} นาทีก่อน)`);
+  } else {
+    lines.push("เครื่องหมายตรวจสอบ: หายไป (ข้อมูลถูกล้าง)");
+  }
+
+  let total = 0;
+  const parts = [];
+  Object.keys(cache).forEach((k) => {
+    if (!k.startsWith("shiori")) return;
+    const size = String(cache[k] || "").length;
+    total += size;
+    if (k.startsWith("shiori-series-")) {
+      let n = 0;
+      try {
+        n = JSON.parse(cache[k]).length;
+      } catch {
+        /* ignore */
       }
+      parts.push(`${n} เรื่อง ${Math.round(size / 1024)}KB`);
     }
-    lines.push(`ข้อมูลแอปรวม: ${Math.round(total / 1024)}KB`);
-    parts.forEach((p) => lines.push(p));
-  } catch {
-    lines.push("นับข้อมูลไม่ได้");
-  }
+  });
+  lines.push(`ข้อมูลแอปรวม: ${Math.round(total / 1024)}KB`);
+  parts.forEach((x) => lines.push(`แท็บ: ${x}`));
+
   try {
-    if (navigator.storage && navigator.storage.persist) {
+    if (navigator.storage && navigator.storage.persisted) {
       const persisted = await navigator.storage.persisted();
-      lines.push(`ขอเก็บถาวร: ${persisted ? "ได้รับ" : "ไม่ได้รับ (เบราว์เซอร์ลบได้เมื่อพื้นที่น้อย)"}`);
+      lines.push(`ขอเก็บถาวร: ${persisted ? "ได้รับ" : "ไม่ได้รับ (เบราว์เซอร์ลบได้เมื่อพื้นที่น้อยมาก)"}`);
     }
     if (navigator.storage && navigator.storage.estimate) {
       const est = await navigator.storage.estimate();
-      lines.push(`พื้นที่ใช้ ${Math.round((est.usage || 0) / 1024)}KB จาก ${Math.round((est.quota || 0) / 1048576)}MB`);
+      lines.push(`พื้นที่ใช้ ${Math.round((est.usage || 0) / 1024)}KB จากทั้งหมด ${Math.round((est.quota || 0) / 1048576)}MB`);
     }
   } catch {
     /* ignore */
   }
   return lines;
-}
-
-// ask the browser not to evict our data
-try {
-  if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
-} catch {
-  /* ignore */
-}
-function storageRemove(key) {
-  try {
-    window.localStorage.removeItem(key);
-  } catch {
-    delete memoryStore[key];
-  }
 }
 
 // --- tabs + migration from the old single-library format ---
@@ -184,7 +321,7 @@ function fileToDataUrl(file) {
   });
 }
 
-export default function Shiori() {
+function ShioriApp() {
   const [tabs, setTabs] = useState(() => loadTabs());
   const [activeTabId, setActiveTabId] = useState(() => storageGet("shiori-active-tab") || null);
   const [series, setSeries] = useState([]);
@@ -198,6 +335,11 @@ export default function Shiori() {
   const [newTabPrompt, setNewTabPrompt] = useState(false);
   const [editTabOpen, setEditTabOpen] = useState(false);
   const [backupOpen, setBackupOpen] = useState(false);
+
+  useEffect(() => {
+    setStorageErrorHandler((m) => setError(m));
+    return () => setStorageErrorHandler(null);
+  }, []);
 
   useEffect(() => {
     if (!activeTabId && tabs[0]) setActiveTabId(tabs[0].id);
@@ -497,6 +639,15 @@ export default function Shiori() {
   );
 }
 
+export default function Shiori() {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    initStorage().finally(() => setReady(true));
+  }, []);
+  if (!ready) return <div className="min-h-screen" style={{ backgroundColor: "#14171f" }} />;
+  return <ShioriApp />;
+}
+
 function HeaderTabChip({ tab }) {
   if (!tab) return <div className="flex-1" />;
   return (
@@ -705,7 +856,7 @@ function BackupModal({ onClose, onExport, onImportFile }) {
   function doImport() {
     onImportFile(confirmFile, (ok) => {
       if (ok) {
-        window.location.reload();
+        flushStorage().then(() => window.location.reload());
       } else {
         setMsg("ไฟล์ไม่ถูกต้อง ไม่สามารถนำเข้าได้");
         setConfirmFile(null);
